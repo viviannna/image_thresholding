@@ -80,20 +80,23 @@ import pickle as pk
 fn_name = "threshold_growth_hough"
 
 fn_name = "threshold_growth_colonies"
+fn_name = "threshold_growth_colonies"
 
 def threshold_growth_colonies(folder,
                               image,
-                              shrink_frac=0.80,
-                              blocksize=51,
-                              C=2,
-                              min_area=50):
+                              shrink_frac=0.75,    # shrink the mask a bit more
+                              blocksize=41,        # larger window for adaptiveThresh
+                              C=1,                 # smaller constant to pick up fainter spots
+                              min_area=80):        # raise min_area to filter speckles
     """
     1) Auto-detect plate via HoughCircles
     2) Mask only inside a smaller circle (shrink_frac*radius)
-    3) Flatten lighting, then adaptive inverted threshold (to pick dark colonies)
-    4) Morph-open to clean noise
-    5) Filter contours by area (min_area)
-    6) Draw colonies in red
+    3) Black-hat to boost dark colonies
+    4) Adaptive inverted threshold (dark colonies → white)
+    5) HSV filter to remove shadows
+    6) Morph-open + mask out rim
+    7) Filter contours by area (min_area)
+    8) Draw colonies in red + save
     """
     # 1) load + gray
     img_path = os.path.join(folder, image)
@@ -117,44 +120,60 @@ def threshold_growth_colonies(folder,
         center = (w//2, h//2)
         radius = min(center) - 10
 
-    # 3) build smaller mask & draw true plate rim
+    # 3) build smaller mask & draw true rim
     small_r = int(radius * shrink_frac)
     mask = np.zeros((h, w), dtype=np.uint8)
     cv2.circle(mask, center, small_r, 255, -1)
     output = img.copy()
-    cv2.circle(output, center, radius, (255, 0, 0), 2)       # blue true rim
-    cv2.circle(output, center, small_r, (0, 0, 255), 1)      # red inner mask
+    cv2.circle(output, center, radius, (255, 0, 0), 2)
 
-    # 4) flatten background
+    # 4) black-hat to enhance dark colonies
+    bh_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25,25))
+    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, bh_kernel)
+    _, bh_thresh = cv2.threshold(blackhat, 0, 255,
+                                cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # 5) flatten background inside mask
     inside = cv2.bitwise_and(gray, gray, mask=mask)
     bg = cv2.morphologyEx(inside,
                           cv2.MORPH_OPEN,
                           cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31,31)))
     corr = cv2.subtract(inside, bg)
 
-    # 5) adaptive inverted threshold → dark colonies = white
+    # 6) adaptive inverted threshold → dark colonies = white
     adapt = cv2.adaptiveThreshold(corr, 255,
                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                   cv2.THRESH_BINARY_INV,
                                   blockSize=blocksize,
                                   C=C)
 
-    # 6) clean small noise
-    clean = cv2.morphologyEx(adapt,
+    # 7) combine adaptive + blackhat
+    combined = cv2.bitwise_or(adapt, bh_thresh)
+
+    # 8) HSV yellow filter → knock out gray/blue shadows
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    lower_yellow = np.array([20,  50,  80])
+    upper_yellow = np.array([40, 255, 255])
+    yellow_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+    combined = cv2.bitwise_and(combined, yellow_mask)
+
+    # 9) clean + re-mask to remove rim artifacts
+    clean = cv2.morphologyEx(combined,
                              cv2.MORPH_OPEN,
                              cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3)),
                              iterations=2)
+    clean = cv2.bitwise_and(clean, mask)
 
-    # 7) find/filter contours
+    # 10) find/filter contours
     cnts, _ = cv2.findContours(clean,
                                cv2.RETR_EXTERNAL,
                                cv2.CHAIN_APPROX_SIMPLE)
     colonies = [c for c in cnts if cv2.contourArea(c) >= min_area]
 
-    # 8) draw
-    cv2.drawContours(output, colonies, -1, (0, 0, 255), 2)   # red
+    # 11) draw
+    cv2.drawContours(output, colonies, -1, (0, 0, 255), 2)
 
-    # 9) save
+    # 12) save
     out_dir = os.path.join(fn_name, folder)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, image)
@@ -162,6 +181,12 @@ def threshold_growth_colonies(folder,
     print(f"Saved to {out_path}  ({len(colonies)} colonies)")
 
     return output
+
+
+if __name__ == "__main__":
+    for image_folder in ["20250425_083100", "20250423_205819"]:
+        for image_file in os.listdir(image_folder):
+            threshold_growth_colonies(image_folder, image_file)
 
 
 def extract_features(contours):
