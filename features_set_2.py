@@ -3,6 +3,8 @@ import cv2
 import numpy as np
 import shutil
 from datetime import datetime
+import pickle as pk
+import csv
 
 # Global masks
 exclusion_masks = {}
@@ -46,31 +48,6 @@ def assign_areas_and_filter_contours(
                 area_shares[i] += share
     return area_shares, kept_contours
 
-# def filter_contours_by_centers(
-#     contours: List[np.ndarray],
-#     centers: List[Tuple[int, int]],
-#     method: str = "sparse",
-#     threshold: float = 20.0
-# ) -> List[np.ndarray]:
-#     """
-#     - 'sparse' mode: keep any contour whose signed distance from a center
-#       is ≥ -threshold (so contains the center or comes within threshold px outside).
-#     - 'thick' mode: keep any contour that actually contains the center (dist > 0).
-#     """
-#     kept = []
-#     for c in contours:
-#         for (x, y) in centers:
-#             dist = cv2.pointPolygonTest(c, (float(x), float(y)), True)
-#             if method == "sparse":
-#                 if dist >= -threshold:
-#                     kept.append(c)
-#                     break
-#             else:  # thick
-#                 if dist > 0:
-#                     kept.append(c)
-#                     break
-#     return kept
-
 def find_centers_in_contours(
     contours: list[np.ndarray],
     centers_path: str,
@@ -84,13 +61,13 @@ def find_centers_in_contours(
     if centers_path is None:
         return []
     centers = detect_nonwhite_clusters(centers_path)
-    area_share, kept_contours = assign_areas_and_filter_contours(contours, centers, method, threshold=20.0)
+    area_share, kept_contours = assign_areas_and_filter_contours(contours, centers, method, threshold=5.0)
     if visualize_steps:
         # Draw the kept contours on top 
         cv2.drawContours(annotated, kept_contours, -1, (0, 100, 0), 2)
 
     # Now loop thorugh the contours and if multiple centers are 
-    return kept_contours
+    return area_share, kept_contours
 
 # -----------------------
 # Colony-detection funcs
@@ -252,6 +229,13 @@ def select_method(base, date):
         else:
             return "thick"
     return "sparse"
+ 
+def shift_centers(centers, base):
+    
+    if "3A" in base: 
+        return [(x+10, y) for x, y in centers]
+    else:
+        return centers
 
 earliest = datetime.strptime("20250422_164340", "%Y%m%d_%H%M%S")
 def get_timesteps_since(date_str: str) -> float:
@@ -262,9 +246,15 @@ def get_timesteps_since(date_str: str) -> float:
 # Main
 # -----------------------
 if __name__ == "__main__":
+    
+    PK_PATH = 'featureset2.pk'
+    CSV_PATH = 'featureset2.csv'
+
     base_dir = "cropped"
-    if os.path.exists("centers"):
-        shutil.rmtree("centers")
+    # if os.path.exists("centers"):
+    #     shutil.rmtree("centers")
+
+    feature_list = []
 
     plates = ["0A","0B","3A","3B","6A","6B","9A","9B"]
     for plate in plates:
@@ -278,69 +268,111 @@ if __name__ == "__main__":
     alpha = 0.5
     radius = 2  # circle radius for centers
 
-    for date in sorted(os.listdir(base_dir)):
-        date_dir = os.path.join(base_dir, date)
-        if not os.path.isdir(date_dir):
-            continue
-
-        output_folder = os.path.join("centers", date)
-        os.makedirs(output_folder, exist_ok=True)
-
-        for filename in os.listdir(date_dir):
-            if not filename.lower().endswith(('.jpg','.jpeg','.png')):
+    if not os.path.exists(PK_PATH):
+        for date in sorted(os.listdir(base_dir)):
+            date_dir = os.path.join(base_dir, date)
+            if not os.path.isdir(date_dir):
                 continue
 
-            base, _ = os.path.splitext(filename)
-            mask = exclusion_masks.get(base)
-            centers_path = center_masks.get(base)
+            output_folder = os.path.join("centers", date)
+            os.makedirs(output_folder, exist_ok=True)
 
-            # detect colonies
-            method = select_method(base, date)
-            if method == "thick":
-                kept_contours, total_area, num_colonies, annotated = thick_colonies(
-                    date_dir, filename, base, exclusion_mask=mask
-                )
-            else:
-                kept_contours, total_area, num_colonies, annotated = sparse_colonies(
-                    date_dir, filename, base, exclusion_mask=mask
-                )
+            for filename in os.listdir(date_dir):
+                if not filename.lower().endswith(('.jpg','.jpeg','.png')):
+                    continue
 
-            # filter by center containment & plot in dark green if requested
-            if annotated is not None:
-                kept_contours = find_centers_in_contours(
+                base, _ = os.path.splitext(filename)
+                mask = exclusion_masks.get(base)
+                centers_path = center_masks.get(base)
+
+                # detect colonies
+                method = select_method(base, date)
+                if method == "thick":
+                    kept_contours, total_area, num_colonies, annotated = thick_colonies(
+                        date_dir, filename, base, exclusion_mask=mask
+                    )
+                else:
+                    kept_contours, total_area, num_colonies, annotated = sparse_colonies(
+                        date_dir, filename, base, exclusion_mask=mask
+                    )
+
+                area_share, kept_contours = find_centers_in_contours(
                     kept_contours,
                     centers_path,
                     annotated, method
                 )
 
-                # then the existing red + blue overlays …
-                h, w = annotated.shape[:2]
-                if mask is not None:
-                    m = mask.astype(bool)
-                    # red overlay
-                    annotated[...,2][m] = (
-                        (1-alpha)*annotated[...,2][m] + alpha*255
-                    ).astype(np.uint8)
-                    annotated[...,0][m] = (annotated[...,0][m] * (1-alpha)).astype(np.uint8)
-                    annotated[...,1][m] = (annotated[...,1][m] * (1-alpha)).astype(np.uint8)
 
-                if centers_path:
-                    centers = detect_nonwhite_clusters(centers_path)
-                    for x, y in centers:
-                        x0, x1 = max(x-radius, 0), min(x+radius+1, w)
-                        y0, y1 = max(y-radius, 0), min(y+radius+1, h)
-                        roi = annotated[y0:y1, x0:x1]
-                        yy, xx = np.ogrid[y0:y1, x0:x1]
-                        circle_mask = ((xx - x)**2 + (yy - y)**2) <= radius**2
+                # filter by center containment & plot in dark green if requested
+                if visualize_steps and annotated is not None:
+                
 
-                        # blue circle
-                        roi[...,0][circle_mask] = (
-                            (1-alpha)*roi[...,0][circle_mask] + alpha*255
+                    # then the existing red + blue overlays …
+                    h, w = annotated.shape[:2]
+                    if mask is not None:
+                        m = mask.astype(bool)
+                        # red overlay
+                        annotated[...,2][m] = (
+                            (1-alpha)*annotated[...,2][m] + alpha*255
                         ).astype(np.uint8)
-                        roi[...,1][circle_mask] = (roi[...,1][circle_mask] * (1-alpha)).astype(np.uint8)
-                        roi[...,2][circle_mask] = (roi[...,2][circle_mask] * (1-alpha)).astype(np.uint8)
-                        annotated[y0:y1, x0:x1] = roi
+                        annotated[...,0][m] = (annotated[...,0][m] * (1-alpha)).astype(np.uint8)
+                        annotated[...,1][m] = (annotated[...,1][m] * (1-alpha)).astype(np.uint8)
 
-                out_path = os.path.join(output_folder, f"{base}.png")
-                cv2.imwrite(out_path, annotated)
-                print(f"Saved overlay for {base} → {out_path}")
+                    if centers_path:
+                        centers = detect_nonwhite_clusters(centers_path)
+                        centers = shift_centers(centers, base)
+                        for x, y in centers:
+                            x0, x1 = max(x-radius, 0), min(x+radius+1, w)
+                            y0, y1 = max(y-radius, 0), min(y+radius+1, h)
+                            roi = annotated[y0:y1, x0:x1]
+                            yy, xx = np.ogrid[y0:y1, x0:x1]
+                            circle_mask = ((xx - x)**2 + (yy - y)**2) <= radius**2
+
+                            # blue circle
+                            roi[...,0][circle_mask] = (
+                                (1-alpha)*roi[...,0][circle_mask] + alpha*255
+                            ).astype(np.uint8)
+                            roi[...,1][circle_mask] = (roi[...,1][circle_mask] * (1-alpha)).astype(np.uint8)
+                            roi[...,2][circle_mask] = (roi[...,2][circle_mask] * (1-alpha)).astype(np.uint8)
+                            annotated[y0:y1, x0:x1] = roi
+
+                    out_path = os.path.join(output_folder, f"{base}.png")
+                    cv2.imwrite(out_path, annotated)
+                    print(f"Saved overlay for {base} → {out_path}")
+
+                # Create the feature dictionary 
+
+                timestep = get_timesteps_since(date)
+                group = base[1]
+                num_sprays = int(base[0])
+                feature_tuple = (timestep, group, num_sprays)
+
+                # turn shared_area into a numpy array
+                shared_area = np.array(area_share)
+
+                for colony_area in shared_area:
+                    feature_list.append((feature_tuple, colony_area))
+
+            with open(PK_PATH, 'wb') as f:
+                pk.dump(feature_list, f)
+
+    else:
+        with open(PK_PATH, 'rb') as f:
+            feature_list = pk.load(f)   
+
+    # 2) Write out CSV
+    with open(CSV_PATH, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["time", "group", "numsprays", "colony_area"])
+        for (feature_tuple, colony_area) in feature_list:
+            time, group, numsprays = feature_tuple
+            print(f"{time}, {group}, {numsprays}, {colony_area}")
+            writer.writerow([time, group, numsprays, colony_area])
+
+    print(f"Pickle saved to {PK_PATH}, CSV saved to {CSV_PATH}")
+
+
+        
+
+
+            
