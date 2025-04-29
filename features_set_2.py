@@ -15,30 +15,61 @@ visualize_steps = True
 import cv2
 from typing import List, Tuple
 
-def filter_contours_by_centers(
+def assign_areas_and_filter_contours(
     contours: List[np.ndarray],
     centers: List[Tuple[int, int]],
-    method: str = "sparse",
-    threshold: float = 20.0
-) -> List[np.ndarray]:
+    method: str,
+    threshold: float
+) -> Tuple[List[float], List[np.ndarray]]:
     """
-    - 'sparse' mode: keep any contour whose signed distance from a center
-      is ≥ -threshold (so contains the center or comes within threshold px outside).
-    - 'thick' mode: keep any contour that actually contains the center (dist > 0).
+    For each contour, find which centers it matches (sparse: dist>=-threshold; thick: dist>0).  Divide the contour's area equally among its matching centers.
+    Returns:
+      - area_shares: list of length len(centers) with summed shares
+      - filtered:   list of contours that matched at least one center
     """
-    kept = []
+    area_shares = [0.0]*len(centers)
+    kept_contours = []
     for c in contours:
-        for (x, y) in centers:
+        inside_idxs = []
+        for i,(x,y) in enumerate(centers):
             dist = cv2.pointPolygonTest(c, (float(x), float(y)), True)
-            if method == "sparse":
-                if dist >= -threshold:
-                    kept.append(c)
-                    break
-            else:  # thick
-                if dist > 0:
-                    kept.append(c)
-                    break
-    return kept
+            if method == "sparse" and dist >= -threshold:
+                inside_idxs.append(i)
+            elif method == "thick" and dist > 0:
+                inside_idxs.append(i)
+
+        if inside_idxs:
+            kept_contours.append(c)
+            A = cv2.contourArea(c)
+            share = A / len(inside_idxs)
+            for i in inside_idxs:
+                area_shares[i] += share
+    return area_shares, kept_contours
+
+# def filter_contours_by_centers(
+#     contours: List[np.ndarray],
+#     centers: List[Tuple[int, int]],
+#     method: str = "sparse",
+#     threshold: float = 20.0
+# ) -> List[np.ndarray]:
+#     """
+#     - 'sparse' mode: keep any contour whose signed distance from a center
+#       is ≥ -threshold (so contains the center or comes within threshold px outside).
+#     - 'thick' mode: keep any contour that actually contains the center (dist > 0).
+#     """
+#     kept = []
+#     for c in contours:
+#         for (x, y) in centers:
+#             dist = cv2.pointPolygonTest(c, (float(x), float(y)), True)
+#             if method == "sparse":
+#                 if dist >= -threshold:
+#                     kept.append(c)
+#                     break
+#             else:  # thick
+#                 if dist > 0:
+#                     kept.append(c)
+#                     break
+#     return kept
 
 def find_centers_in_contours(
     contours: list[np.ndarray],
@@ -53,14 +84,13 @@ def find_centers_in_contours(
     if centers_path is None:
         return []
     centers = detect_nonwhite_clusters(centers_path)
-    filtered = filter_contours_by_centers(contours, centers, method)
+    area_share, kept_contours = assign_areas_and_filter_contours(contours, centers, method, threshold=20.0)
     if visualize_steps:
-        # dark green in BGR:
-        cv2.drawContours(annotated, filtered, -1, (0, 100, 0), 2)
-
+        # Draw the kept contours on top 
+        cv2.drawContours(annotated, kept_contours, -1, (0, 100, 0), 2)
 
     # Now loop thorugh the contours and if multiple centers are 
-    return filtered
+    return kept_contours
 
 # -----------------------
 # Colony-detection funcs
