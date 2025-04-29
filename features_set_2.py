@@ -9,7 +9,62 @@ exclusion_masks = {}
 center_masks = {}
 visualize_steps = True
 
-# Sparse-colony detection with exclusion mask applied
+# -----------------------
+# Helper: filter by centers
+# -----------------------
+import cv2
+from typing import List, Tuple
+
+def filter_contours_by_centers(
+    contours: List[np.ndarray],
+    centers: List[Tuple[int, int]],
+    method: str = "sparse",
+    threshold: float = 20.0
+) -> List[np.ndarray]:
+    """
+    - 'sparse' mode: keep any contour whose signed distance from a center
+      is ≥ -threshold (so contains the center or comes within threshold px outside).
+    - 'thick' mode: keep any contour that actually contains the center (dist > 0).
+    """
+    kept = []
+    for c in contours:
+        for (x, y) in centers:
+            dist = cv2.pointPolygonTest(c, (float(x), float(y)), True)
+            if method == "sparse":
+                if dist >= -threshold:
+                    kept.append(c)
+                    break
+            else:  # thick
+                if dist > 0:
+                    kept.append(c)
+                    break
+    return kept
+
+def find_centers_in_contours(
+    contours: list[np.ndarray],
+    centers_path: str,
+    annotated: np.ndarray, method: str
+) -> list[np.ndarray]:
+    """
+    Load centers from centers_path, filter contours to those containing a center,
+    and—if visualize_steps—draw those filtered contours in dark green on annotated.
+    Returns the filtered contour list.
+    """
+    if centers_path is None:
+        return []
+    centers = detect_nonwhite_clusters(centers_path)
+    filtered = filter_contours_by_centers(contours, centers, method)
+    if visualize_steps:
+        # dark green in BGR:
+        cv2.drawContours(annotated, filtered, -1, (0, 100, 0), 2)
+
+
+    # Now loop thorugh the contours and if multiple centers are 
+    return filtered
+
+# -----------------------
+# Colony-detection funcs
+# -----------------------
 def sparse_colonies(folder, image, base, exclusion_mask=None,
                     blocksize=51, C=2, min_area=30, max_area=2000):
     img_path = os.path.join(folder, image)
@@ -22,8 +77,11 @@ def sparse_colonies(folder, image, base, exclusion_mask=None,
     allowed_mask = (1 - exclusion_mask) if exclusion_mask is not None else np.ones((h, w), np.uint8)
 
     # background subtraction
-    bg = cv2.morphologyEx(gray, cv2.MORPH_OPEN,
-                         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31,31)))
+    bg = cv2.morphologyEx(
+        gray,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31,31))
+    )
     corr = cv2.subtract(gray, bg)
 
     # threshold
@@ -62,11 +120,14 @@ def sparse_colonies(folder, image, base, exclusion_mask=None,
 
     total_area = sum(areas)
     num_colonies = len(areas)
-    out = img.copy()
-    cv2.drawContours(out, kept, -1, (0, 255, 0), 2)
-    return kept, total_area, num_colonies, out
 
-# Thick-colony detection with exclusion mask
+    if visualize_steps:
+        out = img.copy()
+        cv2.drawContours(out, kept, -1, (0, 255, 0), 2)
+        return kept, total_area, num_colonies, out
+    else:
+        return kept, total_area, num_colonies, None
+
 def thick_colonies(folder, image, base, exclusion_mask=None):
     img_path = os.path.join(folder, image)
     img = cv2.imread(img_path)
@@ -104,11 +165,17 @@ def thick_colonies(folder, image, base, exclusion_mask=None):
 
     total_area = sum(areas)
     num_colonies = len(areas)
-    out = img.copy()
-    cv2.drawContours(out, kept, -1, (0, 255, 0), 2)
-    return kept, total_area, num_colonies, out
 
-# Load a red-based exclusion mask
+    if visualize_steps:
+        out = img.copy()
+        cv2.drawContours(out, kept, -1, (0, 255, 0), 2)
+        return kept, total_area, num_colonies, out
+    else:
+        return kept, total_area, num_colonies, None
+
+# -----------------------
+# Other utilities
+# -----------------------
 def load_exclusion_mask(mask_path):
     img = cv2.imread(mask_path)
     if img is None:
@@ -120,7 +187,6 @@ def load_exclusion_mask(mask_path):
     m2 = cv2.inRange(hsv, lower_red2, upper_red2)
     return (cv2.bitwise_or(m1, m2) > 0).astype(np.uint8)
 
-# Detect non-white clusters for centers
 def detect_nonwhite_clusters(image_path, white_thresh=255, min_size=0):
     img = cv2.imread(image_path)
     if img is None:
@@ -135,7 +201,6 @@ def detect_nonwhite_clusters(image_path, white_thresh=255, min_size=0):
         centers.append((int(xs.mean()), int(ys.mean())))
     return centers
 
-# Logic to pick detection method per plate
 def select_method(base, date):
     if base in {"0A", "0B"}:
         return "thick" if date >= "20250424_165952" else "sparse"
@@ -158,12 +223,14 @@ def select_method(base, date):
             return "thick"
     return "sparse"
 
-# Calculate seconds since earliest timestamp
 earliest = datetime.strptime("20250422_164340", "%Y%m%d_%H%M%S")
 def get_timesteps_since(date_str: str) -> float:
     dt = datetime.strptime(date_str, "%Y%m%d_%H%M%S")
     return (dt - earliest).total_seconds()
 
+# -----------------------
+# Main
+# -----------------------
 if __name__ == "__main__":
     base_dir = "cropped"
     if os.path.exists("centers"):
@@ -174,14 +241,12 @@ if __name__ == "__main__":
         mp = os.path.join("border_masks", f"{plate}_mask.png")
         if os.path.exists(mp):
             exclusion_masks[plate] = load_exclusion_mask(mp)
-
-    for plate in plates:
         cp = os.path.join("center_masks", f"{plate}_centers.png")
         if os.path.exists(cp):
             center_masks[plate] = cp
 
     alpha = 0.5
-    radius = 2
+    radius = 2  # circle radius for centers
 
     for date in sorted(os.listdir(base_dir)):
         date_dir = os.path.join(base_dir, date)
@@ -199,34 +264,37 @@ if __name__ == "__main__":
             mask = exclusion_masks.get(base)
             centers_path = center_masks.get(base)
 
-            # colony detection
+            # detect colonies
             method = select_method(base, date)
             if method == "thick":
-                _, total_area, num_colonies, annotated = thick_colonies(
+                kept_contours, total_area, num_colonies, annotated = thick_colonies(
                     date_dir, filename, base, exclusion_mask=mask
                 )
             else:
-                _, total_area, num_colonies, annotated = sparse_colonies(
+                kept_contours, total_area, num_colonies, annotated = sparse_colonies(
                     date_dir, filename, base, exclusion_mask=mask
                 )
 
-            h, w = annotated.shape[:2]
+            # filter by center containment & plot in dark green if requested
+            if annotated is not None:
+                kept_contours = find_centers_in_contours(
+                    kept_contours,
+                    centers_path,
+                    annotated, method
+                )
 
-            if visualize_steps:
-            # in-place red overlay under exclusion mask
+                # then the existing red + blue overlays …
+                h, w = annotated.shape[:2]
                 if mask is not None:
                     m = mask.astype(bool)
-                    # red channel
+                    # red overlay
                     annotated[...,2][m] = (
                         (1-alpha)*annotated[...,2][m] + alpha*255
                     ).astype(np.uint8)
-                    # dim blue & green under mask
                     annotated[...,0][m] = (annotated[...,0][m] * (1-alpha)).astype(np.uint8)
                     annotated[...,1][m] = (annotated[...,1][m] * (1-alpha)).astype(np.uint8)
 
-            if visualize_steps: 
-            # in-place blue circle overlay for centers
-                if centers_path is not None:
+                if centers_path:
                     centers = detect_nonwhite_clusters(centers_path)
                     for x, y in centers:
                         x0, x1 = max(x-radius, 0), min(x+radius+1, w)
@@ -235,13 +303,12 @@ if __name__ == "__main__":
                         yy, xx = np.ogrid[y0:y1, x0:x1]
                         circle_mask = ((xx - x)**2 + (yy - y)**2) <= radius**2
 
-                        # blend blue (BGR=(255,0,0))
+                        # blue circle
                         roi[...,0][circle_mask] = (
                             (1-alpha)*roi[...,0][circle_mask] + alpha*255
                         ).astype(np.uint8)
                         roi[...,1][circle_mask] = (roi[...,1][circle_mask] * (1-alpha)).astype(np.uint8)
                         roi[...,2][circle_mask] = (roi[...,2][circle_mask] * (1-alpha)).astype(np.uint8)
-
                         annotated[y0:y1, x0:x1] = roi
 
                 out_path = os.path.join(output_folder, f"{base}.png")
