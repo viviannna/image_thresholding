@@ -3,6 +3,8 @@ import cv2
 import numpy as np
 import shutil
 from datetime import datetime
+import csv
+import pickle as pk
 
 # Global
 exclusion_masks = {}
@@ -159,61 +161,77 @@ def get_timesteps_since(date_str: str) -> float:
     return delta.total_seconds()
 
 if __name__ == "__main__":
-    base_dir = "cropped"
 
-    # Delete thresholded/ if exists
-    if os.path.exists("thresholded"):
-        shutil.rmtree("thresholded")
+    if not os.path.exists('featureset1.pk'):
+        base_dir = "cropped"
 
-    # Load exclusion masks
-    for plate in ["0A", "0B", "3A", "3B", "6A", "6B", "9A", "9B"]:
-        mask_path = f"{plate}_mask.png"
-        if os.path.exists(mask_path):
-            exclusion_masks[plate] = load_exclusion_mask(mask_path)
+        # Delete thresholded/ if exists
+        if os.path.exists("thresholded"):
+            shutil.rmtree("thresholded")
 
-    feature_dict = {}
+        # Load exclusion masks
+        for plate in ["0A", "0B", "3A", "3B", "6A", "6B", "9A", "9B"]:
+            mask_path = f"{plate}_mask.png"
+            if os.path.exists(mask_path):
+                exclusion_masks[plate] = load_exclusion_mask(mask_path)
 
-    for date in sorted(os.listdir(base_dir)):
-        date_dir = os.path.join(base_dir, date)
-        if not os.path.isdir(date_dir):
-            continue
+        feature_dict = {}
 
-        timestep = get_timesteps_since(date)
-
-        for img in os.listdir(date_dir):
-            if not img.lower().endswith((".jpg", "jpeg", "png")):
+        for date in sorted(os.listdir(base_dir)):
+            date_dir = os.path.join(base_dir, date)
+            if not os.path.isdir(date_dir):
                 continue
 
-            base = os.path.splitext(img)[0]
-            group = base[1]
-            num_sprays = int(base[0])
+            timestep = get_timesteps_since(date)
 
-            method = select_method(base, date)
-            mask = exclusion_masks.get(base, None)
+            for img in os.listdir(date_dir):
+                if not img.lower().endswith((".jpg", "jpeg", "png")):
+                    continue
 
-            if method == "thick":
-                area, num_colonies, out_img = thick_colonies(date_dir, img, base, exclusion_mask=mask)
-            else:
-                area, num_colonies, out_img = sparse_colonies(date_dir, img, base, exclusion_mask=mask)
+                base = os.path.splitext(img)[0]
+                group = base[1]
+                num_sprays = int(base[0])
 
-            # >>>> Overlay red mask onto output <<<<
-            if out_img is not None and mask is not None:
-                overlay = out_img.copy()
-                red_overlay = np.zeros_like(out_img)
-                red_overlay[:, :, 2] = 255  # Red color
-                mask_3ch = np.stack([mask * 255] * 3, axis=-1)
-                overlay = np.where(mask_3ch == 255, (0.7 * overlay + 0.3 * red_overlay).astype(np.uint8), overlay)
-                out_img = overlay
+                method = select_method(base, date)
+                mask = exclusion_masks.get(base, None)
 
-            save_dir = os.path.join("thresholded", date)
-            os.makedirs(save_dir, exist_ok=True)
-            cv2.imwrite(os.path.join(save_dir, img), out_img)
+                if method == "thick":
+                    area, num_colonies, out_img = thick_colonies(date_dir, img, base, exclusion_mask=mask)
+                else:
+                    area, num_colonies, out_img = sparse_colonies(date_dir, img, base, exclusion_mask=mask)
 
-            feature_tuple = (timestep, group, num_sprays)
-            avg_area = area / num_colonies if num_colonies > 0 else 0
-            feature_dict[feature_tuple] = (area, num_colonies, avg_area)
+                # >>>> Overlay red mask onto output <<<<
+                if out_img is not None and mask is not None:
+                    overlay = out_img.copy()
+                    red_overlay = np.zeros_like(out_img)
+                    red_overlay[:, :, 2] = 255  # Red color
+                    mask_3ch = np.stack([mask * 255] * 3, axis=-1)
+                    overlay = np.where(mask_3ch == 255, (0.7 * overlay + 0.3 * red_overlay).astype(np.uint8), overlay)
+                    out_img = overlay
 
+                save_dir = os.path.join("thresholded", date)
+                os.makedirs(save_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(save_dir, img), out_img)
 
-            # @yashika, CSV and pickle
+                feature_tuple = (timestep, group, num_sprays)
+                avg_area = area / num_colonies if num_colonies > 0 else 0
+                feature_dict[feature_tuple] = (area, num_colonies, avg_area)
 
+            with open('featureset1.pk', 'wb') as f:
+                pk.dump(feature_dict, f)
+            
+    else:
+        feature_dict = pk.load(open('featureset1.pk', 'rb'))
 
+    data = []
+    data.append(["time", "group", "numsprays", "area", "numcolonies", "avgarea"])
+    for (key_tuple, image_features) in list(feature_dict.items()):
+        line = list(key_tuple) + list(image_features)
+        data.append(line)
+
+    # Writing data to a CSV file
+    with open('featureset1.csv', 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerows(data)
+
+    print("CSV file 'featureset1.csv' created successfully.")
